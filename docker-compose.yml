@@ -1,0 +1,30 @@
+version: '3'
+
+services:
+  litterbox-api:
+    build: .
+    ports:
+      - "8000:8000"
+    environment:
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - MONGODB_CONNECTION_STRING=${MONGODB_CONNECTION_STRING}
+      - CHROMA_PERSIST_DIRECTORY=/app/data/chroma_db
+      - LLM_MODEL=${LLM_MODEL:-gpt-3.5-turbo}
+      - LLM_TEMPERATURE=${LLM_TEMPERATURE:-0.2}
+      - DEFAULT_SCAFFOLDING_LEVEL=${DEFAULT_SCAFFOLDING_LEVEL:-2}
+      - RETRIEVER_K=${RETRIEVER_K:-5}
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+    volumes:
+      - ./data:/app/data
+    restart: unless-stopped
+
+  mongodb:
+    image: mongo:latest
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongodb_data:/data/db
+    restart: unless-stopped
+
+volumes:
+  mongodb_data:
