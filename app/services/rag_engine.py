@@ -857,7 +857,15 @@ class RAGEngine:
 
             Example: "Happy to help! If you have any other questions about cache memory or want to explore another computer architecture topic, just let me know."
             """
-
+        elif context.get("is_introduction", False):
+            special_instructions = """
+                This is a greeting/introduction:
+                - Respond in a friendly, conversational way
+                - DO NOT treat this as a teaching opportunity about introductions
+                - Simply welcome the student and briefly introduce yourself as LitterBox
+                - Ask how you can help with Computer Architecture topics
+                - Keep it brief (2-3 sentences)
+                """
         elif context.get("is_confused", False):
             special_instructions = """
             The student is expressing confusion:

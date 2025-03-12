@@ -77,27 +77,3 @@ Processes a student query and returns a scaffolded response
 ```
 
 
-### Get Conversation History
-Retrieves the history of a conversation
-
-**Endpoint**
-`GET /api/v1/conversations/{conversation_id}`
-
-**Response (sample):**
-
-```json
-{
-  "conversation_id": "conversation-identifier",
-  "exchanges": [
-    {
-      "timestamp": "2023-03-12T14:22:30Z",
-      "student_message": "What is cache coherence?",
-      "assistant_message": "Cache coherence addresses a challenge...",
-      "topic": "Cache Coherence",
-      "scaffolding_level": 2
-    }
-  ],
-  "student_id": "student-identifier",
-  "created_at": "2023-03-12T14:22:30Z"
-}
-```

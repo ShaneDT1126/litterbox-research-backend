@@ -1,4 +1,5 @@
-from fastapi import FastAPI, HTTPException, Request
+from contextlib import asynccontextmanager
+from fastapi import FastAPI, HTTPException, Request, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from typing import List, Optional
 from app.models.schemas import QueryRequest, QueryResponse, Source
@@ -8,23 +9,7 @@ from app.core.config import settings
 import time
 import traceback
 import uvicorn
-
-# Initialize FastAPI app
-app = FastAPI(
-    title="LitterBox API",
-    description="API for LitterBox, a scaffolding-based learning assistant for Computer Architecture",
-    version="1.0.1",
-
-)
-
-# Add CORS middleware to allow Copilot Studio to access our API
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],  # To be adjust in production
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+from datetime import datetime
 
 # Initialize logger
 logger = get_logger(__name__)
@@ -33,8 +18,52 @@ logger = get_logger(__name__)
 rag_engine = RAGEngine()
 
 
+# Define lifespan context manager
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Startup code
+    try:
+        logger.info("Initializing LitterBox API...")
+        # Verify RAG engine is properly initialized
+        topics = list(rag_engine.topic_keywords.keys())
+        logger.info(f"RAG engine initialized with {len(topics)} topics")
+        logger.info(f"Using LLM model: {settings.LLM_MODEL}")
+        logger.info(f"API started successfully")
+    except Exception as e:
+        logger.error(f"Startup initialization failed: {str(e)}")
+        logger.error(traceback.format_exc())
+
+    yield  # This is where the app runs
+
+    # Shutdown code (if any)
+    logger.info("Shutting down LitterBox API...")
+
+
+# Initialize FastAPI app with lifespan
+app = FastAPI(
+    title="LitterBox API",
+    description="API for LitterBox, a scaffolding-based learning assistant for Computer Architecture",
+    version="1.0.1",
+    lifespan=lifespan
+)
+
+# Add CORS middleware to allow Copilot Studio to access our API
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # To be adjusted in production
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+
+# Dependency for RAG engine
+def get_rag_engine():
+    return rag_engine
+
+
 @app.post("/api/v1/query", response_model=QueryResponse)
-async def process_query(request: QueryRequest):
+async def process_query(request: QueryRequest, engine: RAGEngine = Depends(get_rag_engine)):
     """Process a student query and return a scaffolded response"""
     start_time = time.time()
 
@@ -43,7 +72,7 @@ async def process_query(request: QueryRequest):
         logger.info(f"Processing query from student {request.student_id}: {request.query[:50]}...")
 
         # Process the query using RAG engine
-        result = rag_engine.process_query(
+        result = engine.process_query(
             query=request.query,
             conversation_id=request.conversation_id,
             student_id=request.student_id
@@ -77,15 +106,35 @@ async def process_query(request: QueryRequest):
 @app.get("/api/v1/health")
 async def health_check():
     """Health check endpoint"""
-    return {"status": "healthy", "version": "1.0.0"}
+    try:
+        # Check if RAG engine is initialized properly
+        topics = list(rag_engine.topic_keywords.keys())
+
+        return {
+            "status": "healthy",
+            "version": "1.0.1",
+            "model": settings.LLM_MODEL,
+            "topics_loaded": len(topics),
+            "timestamp": datetime.now().isoformat(),
+            "environment": "production" if settings.MONGODB_CONNECTION_STRING.startswith(
+                "mongodb+srv") else "development"
+        }
+    except Exception as e:
+        logger.error(f"Health check failed: {str(e)}")
+        return {
+            "status": "unhealthy",
+            "error": str(e),
+            "version": "1.0.1",
+            "timestamp": datetime.now().isoformat()
+        }
 
 
 @app.get("/api/v1/topics")
-async def get_topics():
+async def get_topics(engine: RAGEngine = Depends(get_rag_engine)):
     """Get list of available topics"""
     try:
         # Return the list of topics from the RAG engine
-        topics = list(rag_engine.topic_keywords.keys())
+        topics = list(engine.topic_keywords.keys())
         return {"topics": topics}
 
     except Exception as e:

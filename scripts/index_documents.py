@@ -178,21 +178,16 @@ def index_documents(content_dir: str, db_dir: str, chunk_size: int = 1000, chunk
         # Add original metadata
         metadata.update(doc.metadata)
 
-        # Filter complex metadata for ChromaDB compatibility
-        filtered_metadata = filter_complex_metadata(metadata)
-
         # Add to processed docs
         processed_docs.append({
             "content": doc.page_content,
-            "metadata": filtered_metadata
+            "metadata": metadata
         })
 
     # Add to vector store
     logger.info("Adding documents to vector store...")
     vector_store.add_documents(processed_docs)
     logger.info(f"Added {len(processed_docs)} documents to vector store")
-
-    logger.info("Indexing complete!")
 
 
 def main():
