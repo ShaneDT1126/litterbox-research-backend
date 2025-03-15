@@ -10,6 +10,11 @@ class Settings(BaseSettings):
     # API Keys
     OPENAI_API_KEY: str = os.getenv("OPENAI_API_KEY", "")
 
+    # Azure Blob Storage
+    AZURE_STORAGE_CONNECTION_STRING: str = os.getenv("AZURE_STORAGE_CONNECTION_STRING", "")
+    AZURE_STORAGE_CONTAINER_NAME: str = os.getenv("AZURE_STORAGE_CONTAINER_NAME", "litterbox-vectorstore")
+    AZURE_STORAGE_BLOB_PREFIX: str = os.getenv("AZURE_STORAGE_BLOB_PREFIX", "chroma-db")
+
     # MongoDB Configuration
     MONGODB_CONNECTION_STRING: str = os.getenv("MONGODB_CONNECTION_STRING", "")
     MONGODB_DATABASE: str = "litterbox"
