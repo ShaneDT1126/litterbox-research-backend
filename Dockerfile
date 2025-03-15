@@ -30,7 +30,7 @@ USER appuser
 # Expose port
 EXPOSE 8000
 
-# Set environment variables
+# Environment variables
 ENV PYTHONPATH=/app
 ENV PYTHONUNBUFFERED=1
 ENV OPENAI_API_KEY=""
@@ -43,6 +43,10 @@ ENV RETRIEVER_K=5
 ENV API_HOST="0.0.0.0"
 ENV API_PORT=8000
 ENV LOG_LEVEL="INFO"
+# Azure Blob Storage environment variables
+ENV AZURE_STORAGE_CONNECTION_STRING=""
+ENV AZURE_STORAGE_CONTAINER_NAME="litterbox-vectorstore"
+ENV AZURE_STORAGE_BLOB_PREFIX="chroma-db"
 
 # Health check
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \

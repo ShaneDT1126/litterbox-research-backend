@@ -579,6 +579,9 @@ class RAGEngine:
         # Detect the topic
         detected_topic = self.detect_topic(query)
 
+        # Check if this is a verification request
+        is_verification, has_proposed_answer = self._is_verification_request(query)
+
         # Initialize context dictionary
         context = {
             "is_introduction": self.is_introduction(query) and not history,
@@ -586,7 +589,9 @@ class RAGEngine:
             "detected_topic": detected_topic,
             "scaffolding_level": current_scaffolding_level,
             "is_term_refresh_request": False,
-            "is_acknowledgment": detected_topic == "MAINTAIN_CURRENT_TOPIC"
+            "is_acknowledgment": detected_topic == "MAINTAIN_CURRENT_TOPIC",
+            "is_verification_request": is_verification,
+            "has_proposed_answer": has_proposed_answer
         }
 
         # If this is an acknowledgment or we need to maintain the current topic
@@ -629,14 +634,23 @@ class RAGEngine:
     def _generate_response_with_single_template(self, query: str, history: str, content: str, context: Dict) -> str:
         """Generate a response using a refined template that balances guidance with conciseness"""
 
-        # Revised system template
+        # Base System template
         system_template = """
         You are LitterBox, an AI companion specialized in Computer Architecture that guides learning through discovery. Your core purpose is to help users develop understanding by thinking through concepts themselves rather than receiving direct answers.
 
         FUNDAMENTAL RULE:
-        - NEVER provide direct, complete answers to questions
-        - Instead, guide the student to discover answers through appropriate scaffolding
+        - For verification requests where the student's answer is CORRECT, provide direct confirmation and explanation
+        - For verification requests where the student's answer is INCORRECT, DONT provide answer instead use scaffolding to guide them toward the correct answer
+        - For all other questions, guide the student to discover answers through appropriate scaffolding
         - If you are asked about anything unrelated or irrelevant, DON'T ENTERTAIN it and let them know you only answer to Computer Organization Architecture related questions. (1 sentence maximum)
+
+        VERIFICATION APPROACH:
+        - When a student asks you to verify their answer or understanding:
+          1. First determine if their answer is correct or incorrect
+          2. If CORRECT: Directly confirm they are right and provide supporting explanation
+          3. If INCORRECT: Use appropriate scaffolding based on their level to guide them toward the correct answer
+          4. For calculations, show the correct calculation steps when confirming a correct answer
+          5. For conceptual understanding, reinforce correct understanding with additional context
 
         SCAFFOLDING APPROACH:
 
@@ -674,7 +688,6 @@ class RAGEngine:
         - Use white space effectively
 
         PROHIBITED PATTERNS:
-        - NEVER provide complete, direct answers to questions
         - Don't ask more than 2 questions in a single response
         - Don't overwhelm with too many concepts at once
         - Don't write lengthy, dense paragraphs
@@ -687,7 +700,7 @@ class RAGEngine:
         - Analogies that illuminate complex concepts
         - Partial explanations that invite completion
         - Progressive guidance across multiple exchanges
-        
+
         HANDLING CLOSURE:
         - When a student indicates understanding or thanks you, respect that as closure
         - Do not continue teaching or asking questions when a student signals they're done
@@ -696,7 +709,7 @@ class RAGEngine:
         - Keep closure responses brief (2-3 sentences) and don't introduce new material
         """
 
-        # Create a user message that provides all necessary context
+        # A user message that provides all necessary context
         user_message = """
         CURRENT QUERY: {query}
 
@@ -711,6 +724,8 @@ class RAGEngine:
         - Topic transition: {is_transition}
         - Previous topic: {previous_topic}
         - Term refresh request: {is_term_refresh}
+        - Verification request: {is_verification_request}
+        - Has proposed answer: {has_proposed_answer}
 
         CONVERSATION HISTORY:
         {history}
@@ -719,13 +734,14 @@ class RAGEngine:
         {content}
 
         CRITICAL GUIDELINES:
-        1. NEVER provide a direct, complete answer to the question
-        2. Guide the student to discover the answer through appropriate scaffolding
-        3. Be concise and focused - aim for 100-150 words when possible
-        4. Ask only 1-2 questions (not more) in your response
-        5. Focus on one aspect of the topic rather than trying to cover everything
-        6. Use short paragraphs (2-3 sentences) and effective white space
-        7. Sound conversational but efficient
+        1. For verification requests where the student's answer is CORRECT, provide direct confirmation and explanation
+        2. For verification requests where the student's answer is INCORRECT, use scaffolding to guide them toward the correct answer
+        3. For all other questions, guide the student to discover the answer through appropriate scaffolding
+        4. Be concise and focused - aim for 100-150 words when possible
+        5. Ask only 1-2 questions (not more) in your response
+        6. Focus on one aspect of the topic rather than trying to cover everything
+        7. Use short paragraphs (2-3 sentences) and effective white space
+        8. Sound conversational but efficient
 
         SPECIAL INSTRUCTIONS:
         {special_instructions}
@@ -756,6 +772,29 @@ class RAGEngine:
 
             Example: "Happy to help! If you have any other questions about cache memory or want to explore another computer architecture topic, just let me know."
             """
+        elif context.get("is_verification_request", False) and context.get("has_proposed_answer", False):
+            special_instructions = """
+            The student is asking you to verify their answer or understanding:
+
+            CRITICAL APPROACH:
+
+            1. First, determine if their answer/understanding is CORRECT or INCORRECT based on the relevant content
+
+            2. If their answer is CORRECT:
+               - Directly confirm they are right (e.g., "Yes, your answer of X is correct.")
+               - Provide a clear explanation of why it's correct
+               - For calculations, show the complete calculation steps to reinforce understanding
+               - For concepts, provide additional context to deepen their understanding
+               - No need to ask further questions about this specific point
+
+            3. If their answer is INCORRECT:
+               - DO NOT directly state they are wrong or provide the correct answer
+               - Use scaffolding appropriate to their level to guide them toward the correct answer
+               - For calculations, ask about a specific step or assumption that might be incorrect
+               - For concepts, ask a targeted question that helps them reconsider their understanding
+
+            Remember: Only provide direct confirmation when they are correct. Otherwise, use scaffolding to guide them.
+            """
         elif context.get("is_introduction", False):
             special_instructions = """
                 This is a greeting/introduction:
@@ -779,7 +818,7 @@ class RAGEngine:
             - Ask one question about their familiarity with this aspect
             """
 
-        # Add topic-specific instructions for complex topics
+        # Topic-specific instructions for complex topics
         if context["detected_topic"] == "Cache Memory" or context["detected_topic"] == "Memory Systems":
             special_instructions += """
             This is a complex topic with formulas and calculations:
@@ -789,7 +828,7 @@ class RAGEngine:
             - Guide them to build the formula step by step across multiple exchanges
             """
 
-        # Check for thank you messages
+        # Checks for thank you messages
         thank_you_patterns = [
             r"(?i)thank(s| you)",
             r"(?i)got it",
@@ -816,13 +855,13 @@ class RAGEngine:
                 Example: "You're welcome! If you have any other questions about cache memory or want to explore another computer architecture topic, just let me know."
                 """
 
-        # Create the chat prompt template
+        # Creates the chat prompt template
         chat_prompt = ChatPromptTemplate.from_messages([
             ("system", system_template),
             ("user", user_message)
         ])
 
-        # Format the messages with all context variables
+        # Formats the messages with all context variables
         messages = chat_prompt.format_messages(
             query=query,
             topic=context["detected_topic"],
@@ -833,6 +872,8 @@ class RAGEngine:
             is_transition=str(context["is_topic_transition"]),
             previous_topic=context["previous_topic"] if context["previous_topic"] else "none",
             is_term_refresh=str(context.get("is_term_refresh_request", False)),
+            is_verification_request=str(context.get("is_verification_request", False)),
+            has_proposed_answer=str(context.get("has_proposed_answer", False)),
             special_instructions=special_instructions,
             history=history,
             content=content
@@ -842,3 +883,36 @@ class RAGEngine:
         logger.info(f"Generating concise response for topic: {context['detected_topic']}")
         response = self.llm.invoke(messages)
         return response.content
+
+    def _is_verification_request(self, query: str) -> Tuple[bool, bool]:
+        """
+        Detect if the query is asking for verification of an answer or understanding.
+        Returns a tuple: (is_verification, has_proposed_answer)
+        """
+        verification_patterns = [
+            r"(?i)is (it|this|that) correct",
+            r"(?i)am i (right|correct)",
+            r"(?i)is my (answer|understanding|explanation|interpretation|calculation|result|solution) (right|correct)",
+            r"(?i)did i (understand|calculate|solve|get|explain) (it|this) (right|correctly)",
+            r"(?i)check my (work|calculation|answer|understanding)",
+            r"(?i)verify my (answer|calculation|result|understanding)",
+            r"(?i)i (think|believe|calculated|got|found|understand) [^.?!]+ (is|am) i (right|correct)",
+            r"(?i)my (calculations?|answers?|results?|understanding|explanation) (is|are) [^.?!]+",
+            r"(?i)does that (sound|seem) (right|correct)"
+        ]
+
+        # Check if the query contains a verification request
+        is_verification = any(re.search(pattern, query) for pattern in verification_patterns)
+
+        # Check if the query contains a proposed answer
+        # This could be a numerical value, a specific term, or a statement of understanding
+        has_proposed_answer = bool(
+            # Check for numerical values
+            re.search(r'\d+(\.\d+)?', query) or
+            # Check for statements like "I think X is Y" or "X means Y"
+            re.search(r"(?i)(i think|i believe|means|is defined as|refers to|is when|is a|is the)", query) or
+            # Check for specific technical terms in quotes or emphasized
+            re.search(r'"[^"]+"|\*[^\*]+\*', query)
+        )
+
+        return is_verification, has_proposed_answer
