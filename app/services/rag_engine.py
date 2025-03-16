@@ -267,6 +267,55 @@ class RAGEngine:
 
         return "General Computer Architecture"
 
+    def is_assignment_question(self, query: str) -> bool:
+        """Detect if the query appears to be from an assignment or homework"""
+
+        # Assignment question patterns
+        assignment_patterns = [
+            r"what is the (minimum|maximum|number of|value of|result of)",
+            r"how many [a-z]+ (are|is) (needed|required|used)",
+            r"calculate the",
+            r"compute the",
+            r"find the",
+            r"determine the",
+            r"solve for",
+            r"what (will|would) be the",
+            r"the answer is \d+",
+            r"is the answer \d+",
+            r"is \d+ (the correct answer|right)",
+            r"program.*return",
+            r"register.*spill",
+            r"pipeline.*cycle",
+            r"cache.*miss",
+            r"memory.*refresh"
+        ]
+
+        # Check for assignment patterns
+        for pattern in assignment_patterns:
+            if re.search(pattern, query.lower(), re.IGNORECASE):
+                logger.info(f"Detected assignment question pattern: {pattern}")
+                return True
+
+        # Also check if it's a multiple-choice question
+        return self.is_multiple_choice_question(query)
+
+    def is_step_by_step_request(self, query: str) -> bool:
+        """Detect if the student is asking for a step-by-step solution"""
+        step_patterns = [
+            r"(?i)step[ -]by[ -]step",
+            r"(?i)do it for me",
+            r"(?i)show me how",
+            r"(?i)walk me through",
+            r"(?i)guide me through",
+            r"(?i)explain the (steps|process)",
+            r"(?i)how (do|would|can) (i|you) (solve|calculate|compute|find)",
+            r"(?i)what (is|are) the steps",
+            r"(?i)how to (solve|calculate|compute|find)",
+            r"(?i)can you (solve|calculate|compute|find) (it|this)"
+        ]
+
+        return any(re.search(pattern, query) for pattern in step_patterns)
+
     def process_query(self,
                       query: str,
                       conversation_id: str = "new",
@@ -284,18 +333,27 @@ class RAGEngine:
         # Determine current scaffolding level from conversation history
         current_scaffolding_level = self._get_current_scaffolding_level(conversation_id, history)
 
-        # Check if this is a multiple-choice question
-        is_mcq = self.is_multiple_choice_question(query)
-        if is_mcq:
-            logger.info("Detected multiple-choice question - applying special handling")
-            # Add a reminder to the query for the LLM
-            query = query + " [NOTE: This appears to be a multiple-choice question. Remember to use scaffolded guidance instead of providing the direct answer. Help the student think through the problem without revealing which option is correct.]"
+        # Check if this is an assignment question
+        is_assignment = self.is_assignment_question(query)
+
+        # Check if this is a step-by-step request
+        is_step_request = self.is_step_by_step_request(query)
+
+        # Apply special handling for assignment questions and step-by-step requests
+        if is_assignment:
+            logger.info("Detected assignment question - applying special handling")
+            query = query + " [NOTE: This appears to be an assignment question. Remember to use scaffolded guidance instead of providing the direct answer. Help the student think through the problem without revealing the final answer.]"
+
+        if is_step_request:
+            logger.info("Detected step-by-step request - applying special handling")
+            query = query + " [NOTE: The student is asking for a step-by-step process. Provide guidance on the approach and methodology, but DO NOT complete the final step or reveal the answer. Stop your explanation before reaching the conclusion and ask the student what they think the answer would be.]"
 
         # Gather all contextual information for the query
         context = self._gather_query_context(query, history, current_scaffolding_level)
 
-        # MCQ flag to context
-        context["is_mcq"] = is_mcq
+        # Add flags to context
+        context["is_assignment"] = is_assignment
+        context["is_step_request"] = is_step_request
 
         # Handle special cases
         if context["is_introduction"]:
@@ -317,7 +375,7 @@ class RAGEngine:
         )
 
         # Post-process the response to catch any direct answers that might slip through
-        response_text = self._filter_direct_answers(response_text, is_mcq)
+        response_text = self._filter_direct_answers(response_text, context["is_assignment"], context["is_step_request"])
 
         # Format sources for citation
         sources = self._format_sources(retrieved_docs, context["detected_topic"])
@@ -345,25 +403,34 @@ class RAGEngine:
             conversation_id
         )
 
-    def _filter_direct_answers(self, response: str, is_mcq: bool) -> str:
-        """Filter out direct answers to multiple-choice questions"""
-        if not is_mcq:
+    def _filter_direct_answers(self, response: str, is_assignment: bool, is_step_request: bool) -> str:
+        """Filter out direct answers to assignment questions and step-by-step requests"""
+        if not (is_assignment or is_step_request):
             return response
 
         # Patterns that might indicate a direct answer
         direct_answer_patterns = [
+            # Multiple choice answers
             r"[Tt]he (correct |right |)answer is ([A-D])",
             r"[Oo]ption ([A-D]) is (correct|right)",
             r"([A-D]) is the (correct|right) (answer|option)",
             r"[Tt]he (correct|right) (answer|option) is ([A-D])",
-            r"[Tt]he answer is (\d+)",
-            r"[Tt]herefore, ([A-D]) is (correct|right)",
-            r"[Tt]hus, ([A-D]) is (correct|right)",
-            r"[Ss]o, ([A-D]) is (correct|right)",
-            r"[Cc]hoice ([A-D]) is (correct|right)",
-            r"[Tt]he solution is ([A-D])",
-            r"[Cc]orrect answer: ([A-D])",
-            r"[Aa]nswer: ([A-D])",
+
+            # Numerical answers
+            r"[Tt]he (correct |right |)(answer|result|value|number|minimum|maximum) is (\d+)",
+            r"[Tt]herefore,? the (answer|result|value|number|minimum|maximum) is (\d+)",
+            r"[Tt]hus,? the (answer|result|value|number|minimum|maximum) is (\d+)",
+            r"[Ss]o,? the (answer|result|value|number|minimum|maximum) is (\d+)",
+            r"[Tt]he (total|final) (number of |)(registers|cycles|time|value) (needed|required|used|is) (\d+)",
+            r"[Ww]e need (\d+) (registers|cycles)",
+            r"[Tt]he (program|code|calculation) (requires|needs|uses) (\d+)",
+            r"[Tt]he answer to (this|the) (question|problem) is (\d+)",
+            r"[Tt]he (correct|right) (answer|solution) is (\d+)",
+            r"[Cc]onclusion\s*\n*[^.]*(\d+)[^.]*\.",
+            r"[Tt]herefore, (\d+) (registers|cycles) (are|is) (needed|required|used)",
+            r"[Ss]o, the answer is ([A-D]|option [A-D]|\d+)",
+            r"[Tt]he total (refresh |)time is (\d+)",
+            r"[Tt]he total number of clock cycles (needed |required |)is (\d+)",
         ]
 
         # Check if the response contains a direct answer
@@ -379,34 +446,40 @@ class RAGEngine:
                 modified_response = re.sub(pattern, "[Let's think about this...]", response)
 
                 # Add guidance on how to approach the problem
-                guidance = "\nTo solve this problem, consider the key concepts involved and think about how they apply to each option. What approach would you take to evaluate each possible answer?"
+                guidance = "\nTo solve this problem, consider the key concepts involved. What approach would you take to analyze this step by step?"
 
                 return disclaimer + modified_response + guidance
 
-        # Also check for numerical answers in calculation problems
-        numerical_answer_patterns = [
-            r"[Tt]he (correct |right |)answer is (\d+)",
-            r"[Tt]he result is (\d+)",
-            r"[Tt]he total (number of |)clock cycles (needed |required |)is (\d+)",
-            r"[Tt]he total (refresh |)time is (\d+)",
-            r"[Tt]herefore, the answer is (\d+)",
-        ]
+        # Check for conclusion sections that might contain direct answers
+        conclusion_section = re.search(r"(Conclusion|In conclusion|To summarize|Therefore)[:\s\n]+(.*?)(\n\n|$)",
+                                       response, re.IGNORECASE | re.DOTALL)
+        if conclusion_section:
+            conclusion_text = conclusion_section.group(2)
+            # Check if the conclusion contains a number (likely an answer)
+            if re.search(r"\d+", conclusion_text) or re.search(r"[Tt]he answer is", conclusion_text) or re.search(
+                    r"[Ss]o, the", conclusion_text):
+                logger.warning(f"Detected potential direct answer in conclusion: {conclusion_text}")
 
-        for pattern in numerical_answer_patterns:
-            match = re.search(pattern, response)
-            if match:
-                logger.warning(f"Detected numerical answer in response: {match.group(0)}")
+                # Replace the conclusion with a more open-ended one
+                if is_step_request:
+                    new_conclusion = "Now that we've worked through most of the steps, what do you think the final answer would be? Try to complete the last step yourself based on what we've discussed."
+                else:
+                    new_conclusion = "By working through this problem step by step and analyzing the key concepts, you can determine the answer. What do you think the answer is based on the analysis we've done?"
 
-                # Replace the direct answer with a scaffolded approach
-                disclaimer = "\nInstead of giving you the final answer, let me guide you through the process:\n\n"
+                modified_response = response.replace(conclusion_section.group(0), f"Conclusion:\n{new_conclusion}")
+                return modified_response
 
-                # Remove the direct answer statement
-                modified_response = re.sub(pattern, "[Let's work through this calculation...]", response)
-
-                # Add guidance on how to approach the calculation
-                guidance = "\nWhat steps would you take to solve this problem? Can you identify the key variables and relationships needed for the calculation?"
-
-                return disclaimer + modified_response + guidance
+        # Additional check specifically for step-by-step responses
+        if is_step_request:
+            # Check for final answer statements at the end of the response
+            last_paragraph = response.split('\n\n')[-1]
+            if re.search(r"(the answer is|so,? the|therefore,? the|we get|we have|result is|total is) (\d+|[A-D])",
+                         last_paragraph, re.IGNORECASE):
+                # Replace the last paragraph with an open-ended question
+                paragraphs = response.split('\n\n')
+                paragraphs[
+                    -1] = "Now that we've worked through most of the steps, what do you think the final answer would be? Try to complete the last step yourself based on what we've discussed."
+                return '\n\n'.join(paragraphs)
 
         return response
 
@@ -759,14 +832,38 @@ class RAGEngine:
         system_template = """
         You are LitterBox, an AI companion specialized in Computer Architecture that guides learning through discovery. Your core purpose is to help users develop understanding by thinking through concepts themselves rather than receiving direct answers.
 
-         FUNDAMENTAL RULES:
+        FUNDAMENTAL RULES:
         - For verification requests where the student's answer is CORRECT, provide direct confirmation and explanation
         - For verification requests where the student's answer is INCORRECT, DONT provide answer instead use scaffolding to guide them toward the correct answer
         - For multiple-choice questions, NEVER directly state which option (A, B, C, D) is correct
         - For calculation problems, NEVER provide the final numerical answer directly
+        - For register allocation problems, NEVER state the final number of registers needed
+        - For pipeline execution problems, NEVER state the final number of cycles
+        - For any assignment-like question, NEVER provide the final answer
+        - When asked for step-by-step guidance, STOP before the final step and ask the student to complete it
         - For all questions, guide the student to discover answers through appropriate scaffolding
         - If you are asked about anything unrelated or irrelevant, DON'T ENTERTAIN it and let them know you only answer to Computer Organization Architecture related questions. (1 sentence maximum)
 
+        ASSIGNMENT QUESTION HANDLING:
+        - When a student asks about an assignment or homework question:
+        1. NEVER directly provide the final answer (e.g., "The answer is 6 registers")
+        2. NEVER conclude with a definitive statement about the answer
+        3. Instead, guide the student through the reasoning process step by step
+        4. Ask questions that help the student reach the conclusion themselves
+        5. If you walk through calculations, stop before the final answer and ask the student what they think
+        6. End with an open-ended question rather than a definitive conclusion
+        7. Focus on the methodology and approach rather than the final result
+
+        STEP-BY-STEP REQUEST HANDLING:
+        - When a student asks for a step-by-step process:
+        1. Break down the problem-solving approach into clear steps
+        2. Explain the methodology and reasoning for each step
+        3. Work through the initial steps of the problem
+        4. STOP before the final calculation or conclusion
+        5. Ask the student what they think the next step or final answer would be
+        6. Do not provide a "Conclusion" section that states the answer
+        7. End with a question that encourages the student to complete the process
+        
         MULTIPLE-CHOICE QUESTION HANDLING:
         - When a student asks about a multiple-choice question:
           1. NEVER directly identify which option (A, B, C, D) is correct
@@ -884,7 +981,43 @@ class RAGEngine:
         # Determine special instructions based on context
         special_instructions = ""
 
-        if context.get("is_mcq", False):
+        if context.get("is_step_request", False):
+            special_instructions = """
+            The student is asking for a step-by-step process:
+
+            CRITICAL: When providing steps, you MUST NOT complete the final step or reveal the answer.
+
+            Instead:
+            1. Break down the problem-solving approach into clear steps
+            2. Explain the methodology and reasoning for each step
+            3. Work through the initial steps of the problem
+            4. STOP before the final calculation or conclusion
+            5. Ask the student what they think the next step or final answer would be
+            6. Do not provide a "Conclusion" section that states the answer
+            7. End with a question that encourages the student to complete the process
+
+            Example approach: "Let me guide you through the process. First, we need to... Now, based on these steps, what do you think the answer would be?"
+            """
+
+        elif context.get("is_assignment", False):
+            special_instructions = """
+            This is an assignment-like question:
+
+            CRITICAL: You MUST NOT provide the final answer.
+
+            Instead:
+            1. Guide the student through the reasoning process step by step
+            2. Break down the problem into smaller parts
+            3. Ask questions that help the student think through each step
+            4. If you walk through calculations, stop before the final answer and ask what they think
+            5. End with an open-ended question rather than a definitive conclusion
+            6. NEVER state "the answer is X" or "therefore, we need X registers/cycles"
+            7. NEVER include a conclusion that states the final answer
+
+            Example approach: "Let's analyze this problem step by step. First, let's identify what we're looking for..."
+            """
+
+        elif context.get("is_mcq", False):
             special_instructions = """
                     This is a multiple-choice question:
 
