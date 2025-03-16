@@ -57,6 +57,20 @@ class RAGEngine:
             "not clear", "can you explain", "i'm lost"
         ]
 
+        # Multiple choice question patterns for detection
+        self.mcq_patterns = [
+            r"[A-D]\.\s.*\n[A-D]\.\s.*",  # Multiple lines with A. B. C. D.
+            r"[A-D]\)\s.*\n[A-D]\)\s.*",  # Multiple lines with A) B) C) D)
+            r"is\s+[A-D]\s+the\s+(correct\s+|right\s+)?answer",  # "is A the correct answer"
+            r"answer\s+this\s+for\s+me",  # "answer this for me"
+            r"which\s+(option|answer)\s+is\s+correct",  # "which option is correct"
+            r"the\s+answer\s+is\s+[A-D]",  # "the answer is A"
+            r"^[A-D]$",  # Just a letter A, B, C, or D
+            r"(option|answer)\s+[A-D]",  # "option A" or "answer B"
+            r"is\s+the\s+answer\s+[A-D]",  # "is the answer A"
+            r"is\s+it\s+[A-D]",  # "is it A"
+        ]
+
         # Topic keywords for detection (potential to add if necessary)
         self.topic_keywords = {
             "CPU Architecture": ["cpu", "processor", "alu", "control unit", "registers", "instruction cycle",
@@ -106,6 +120,31 @@ class RAGEngine:
         """Detect if the student is expressing confusion"""
         query_lower = query.lower()
         return any(indicator in query_lower for indicator in self.confusion_indicators)
+
+    def is_multiple_choice_question(self, query: str) -> bool:
+        """Detect if the query is a multiple-choice question"""
+        query_lower = query.lower()
+
+        # Check for common MCQ patterns
+        for pattern in self.mcq_patterns:
+            if re.search(pattern, query_lower, re.IGNORECASE):
+                logger.info(f"Detected multiple-choice question pattern: {pattern}")
+                return True
+
+        # Check for options in the query
+        option_patterns = [
+            r"[A-D]\.\s",  # A. B. C. D.
+            r"[A-D]\)\s",  # A) B) C) D)
+            r"\([A-D]\)\s",  # (A) (B) (C) (D)
+        ]
+
+        for pattern in option_patterns:
+            matches = re.findall(pattern, query)
+            if len(matches) >= 2:  # At least two options found
+                logger.info(f"Detected multiple options in question: {matches}")
+                return True
+
+        return False
 
     def detect_topic(self, query: str, retrieved_docs: List[Document] = None) -> str:
         """Detect the topic of the query based on keywords and retrieved documents"""
@@ -245,8 +284,18 @@ class RAGEngine:
         # Determine current scaffolding level from conversation history
         current_scaffolding_level = self._get_current_scaffolding_level(conversation_id, history)
 
+        # Check if this is a multiple-choice question
+        is_mcq = self.is_multiple_choice_question(query)
+        if is_mcq:
+            logger.info("Detected multiple-choice question - applying special handling")
+            # Add a reminder to the query for the LLM
+            query = query + " [NOTE: This appears to be a multiple-choice question. Remember to use scaffolded guidance instead of providing the direct answer. Help the student think through the problem without revealing which option is correct.]"
+
         # Gather all contextual information for the query
         context = self._gather_query_context(query, history, current_scaffolding_level)
+
+        # MCQ flag to context
+        context["is_mcq"] = is_mcq
 
         # Handle special cases
         if context["is_introduction"]:
@@ -266,6 +315,9 @@ class RAGEngine:
             content=relevant_content,
             context=context
         )
+
+        # Post-process the response to catch any direct answers that might slip through
+        response_text = self._filter_direct_answers(response_text, is_mcq)
 
         # Format sources for citation
         sources = self._format_sources(retrieved_docs, context["detected_topic"])
@@ -292,6 +344,71 @@ class RAGEngine:
             context["detected_topic"],
             conversation_id
         )
+
+    def _filter_direct_answers(self, response: str, is_mcq: bool) -> str:
+        """Filter out direct answers to multiple-choice questions"""
+        if not is_mcq:
+            return response
+
+        # Patterns that might indicate a direct answer
+        direct_answer_patterns = [
+            r"[Tt]he (correct |right |)answer is ([A-D])",
+            r"[Oo]ption ([A-D]) is (correct|right)",
+            r"([A-D]) is the (correct|right) (answer|option)",
+            r"[Tt]he (correct|right) (answer|option) is ([A-D])",
+            r"[Tt]he answer is (\d+)",
+            r"[Tt]herefore, ([A-D]) is (correct|right)",
+            r"[Tt]hus, ([A-D]) is (correct|right)",
+            r"[Ss]o, ([A-D]) is (correct|right)",
+            r"[Cc]hoice ([A-D]) is (correct|right)",
+            r"[Tt]he solution is ([A-D])",
+            r"[Cc]orrect answer: ([A-D])",
+            r"[Aa]nswer: ([A-D])",
+        ]
+
+        # Check if the response contains a direct answer
+        for pattern in direct_answer_patterns:
+            match = re.search(pattern, response)
+            if match:
+                logger.warning(f"Detected direct answer in response: {match.group(0)}")
+
+                # Replace the direct answer with a scaffolded approach
+                disclaimer = "\nI should guide you through this problem rather than providing a direct answer. Let's work through it step by step:\n\n"
+
+                # Remove the direct answer statement
+                modified_response = re.sub(pattern, "[Let's think about this...]", response)
+
+                # Add guidance on how to approach the problem
+                guidance = "\nTo solve this problem, consider the key concepts involved and think about how they apply to each option. What approach would you take to evaluate each possible answer?"
+
+                return disclaimer + modified_response + guidance
+
+        # Also check for numerical answers in calculation problems
+        numerical_answer_patterns = [
+            r"[Tt]he (correct |right |)answer is (\d+)",
+            r"[Tt]he result is (\d+)",
+            r"[Tt]he total (number of |)clock cycles (needed |required |)is (\d+)",
+            r"[Tt]he total (refresh |)time is (\d+)",
+            r"[Tt]herefore, the answer is (\d+)",
+        ]
+
+        for pattern in numerical_answer_patterns:
+            match = re.search(pattern, response)
+            if match:
+                logger.warning(f"Detected numerical answer in response: {match.group(0)}")
+
+                # Replace the direct answer with a scaffolded approach
+                disclaimer = "\nInstead of giving you the final answer, let me guide you through the process:\n\n"
+
+                # Remove the direct answer statement
+                modified_response = re.sub(pattern, "[Let's work through this calculation...]", response)
+
+                # Add guidance on how to approach the calculation
+                guidance = "\nWhat steps would you take to solve this problem? Can you identify the key variables and relationships needed for the calculation?"
+
+                return disclaimer + modified_response + guidance
+
+        return response
 
     def _check_conversation_id(self, conversation_id: str, student_id: Optional[str]) -> Tuple[str, List[Dict]]:
         """Check if conversation exists and retrieve history"""
@@ -582,6 +699,9 @@ class RAGEngine:
         # Check if this is a verification request
         is_verification, has_proposed_answer = self._is_verification_request(query)
 
+        # Check if this is a multiple-choice question
+        is_mcq = self.is_multiple_choice_question(query)
+
         # Initialize context dictionary
         context = {
             "is_introduction": self.is_introduction(query) and not history,
@@ -591,7 +711,8 @@ class RAGEngine:
             "is_term_refresh_request": False,
             "is_acknowledgment": detected_topic == "MAINTAIN_CURRENT_TOPIC",
             "is_verification_request": is_verification,
-            "has_proposed_answer": has_proposed_answer
+            "has_proposed_answer": has_proposed_answer,
+            "is_mcq": is_mcq
         }
 
         # If this is an acknowledgment or we need to maintain the current topic
@@ -638,11 +759,22 @@ class RAGEngine:
         system_template = """
         You are LitterBox, an AI companion specialized in Computer Architecture that guides learning through discovery. Your core purpose is to help users develop understanding by thinking through concepts themselves rather than receiving direct answers.
 
-        FUNDAMENTAL RULE:
+         FUNDAMENTAL RULES:
         - For verification requests where the student's answer is CORRECT, provide direct confirmation and explanation
         - For verification requests where the student's answer is INCORRECT, DONT provide answer instead use scaffolding to guide them toward the correct answer
-        - For all other questions, guide the student to discover answers through appropriate scaffolding
+        - For multiple-choice questions, NEVER directly state which option (A, B, C, D) is correct
+        - For calculation problems, NEVER provide the final numerical answer directly
+        - For all questions, guide the student to discover answers through appropriate scaffolding
         - If you are asked about anything unrelated or irrelevant, DON'T ENTERTAIN it and let them know you only answer to Computer Organization Architecture related questions. (1 sentence maximum)
+
+        MULTIPLE-CHOICE QUESTION HANDLING:
+        - When a student asks about a multiple-choice question:
+          1. NEVER directly identify which option (A, B, C, D) is correct
+          2. NEVER use phrases like "the answer is X" or "option X is correct"
+          3. Instead, discuss the concepts related to the question
+          4. Guide the student through the reasoning process for evaluating each option
+          5. Ask questions that help the student eliminate incorrect options
+          6. Focus on the underlying principles rather than the specific answer
 
         VERIFICATION APPROACH:
         - When a student asks you to verify their answer or understanding:
@@ -726,6 +858,7 @@ class RAGEngine:
         - Term refresh request: {is_term_refresh}
         - Verification request: {is_verification_request}
         - Has proposed answer: {has_proposed_answer}
+        - Is multiple-choice question: {is_mcq}
 
         CONVERSATION HISTORY:
         {history}
@@ -736,12 +869,13 @@ class RAGEngine:
         CRITICAL GUIDELINES:
         1. For verification requests where the student's answer is CORRECT, provide direct confirmation and explanation
         2. For verification requests where the student's answer is INCORRECT, use scaffolding to guide them toward the correct answer
-        3. For all other questions, guide the student to discover the answer through appropriate scaffolding
-        4. Be concise and focused - aim for 100-150 words when possible
-        5. Ask only 1-2 questions (not more) in your response
-        6. Focus on one aspect of the topic rather than trying to cover everything
-        7. Use short paragraphs (2-3 sentences) and effective white space
-        8. Sound conversational but efficient
+        3. For multiple-choice questions, NEVER directly state which option (A, B, C, D) is correct
+        4. For calculation problems, NEVER provide the final numerical answer directly
+        5. Be concise and focused - aim for 100-150 words when possible
+        6. Ask only 1-2 questions (not more) in your response
+        7. Focus on one aspect of the topic rather than trying to cover everything
+        8. Use short paragraphs (2-3 sentences) and effective white space
+        9. Sound conversational but efficient
 
         SPECIAL INSTRUCTIONS:
         {special_instructions}
@@ -750,7 +884,24 @@ class RAGEngine:
         # Determine special instructions based on context
         special_instructions = ""
 
-        if context.get("is_term_refresh_request", False):
+        if context.get("is_mcq", False):
+            special_instructions = """
+                    This is a multiple-choice question:
+
+                    CRITICAL: You MUST NOT reveal which option is correct.
+
+                    Instead:
+                    1. Discuss the concepts related to the question
+                    2. Guide the student through the reasoning process for evaluating each option
+                    3. Ask questions that help the student think through the problem
+                    4. Focus on the underlying principles rather than the specific answer
+                    5. If the student proposes an answer, do not confirm or deny it directly
+                    6. Avoid phrases like "the answer is X" or "option X is correct"
+
+                    Example approach: "This question is about [concept]. Let's think about what [concept] means and how it applies here. What do you think option A means in this context?"
+                    """
+
+        elif context.get("is_term_refresh_request", False):
             special_instructions = """
             The student is asking about terms:
             - Focus on 2-3 key terms maximum, not all of them
@@ -874,6 +1025,7 @@ class RAGEngine:
             is_term_refresh=str(context.get("is_term_refresh_request", False)),
             is_verification_request=str(context.get("is_verification_request", False)),
             has_proposed_answer=str(context.get("has_proposed_answer", False)),
+            is_mcq=str(context.get("is_mcq", False)),
             special_instructions=special_instructions,
             history=history,
             content=content

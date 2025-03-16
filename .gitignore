@@ -39,3 +39,9 @@ logs/
 # OS specific
 .DS_Store
 Thumbs.db
+
+docker-volumes/
+
+deploy-to-azure.sh
+
+.env.deploy
