@@ -377,6 +377,9 @@ class RAGEngine:
         # Post-process the response to catch any direct answers that might slip through
         response_text = self._filter_direct_answers(response_text, context["is_assignment"], context["is_step_request"])
 
+        # Enhance conversational flow
+        response_text = self._enhance_conversational_flow(response_text, query, history)
+
         # Format sources for citation
         sources = self._format_sources(retrieved_docs, context["detected_topic"])
 
@@ -640,7 +643,6 @@ class RAGEngine:
         return []  # For general topics, don't retrieve documents
 
     def _format_conversation_history(self, history: List[Dict]) -> str:
-        """Format conversation history with enhanced topic tracking"""
         if not history:
             return ""
 
@@ -648,25 +650,24 @@ class RAGEngine:
         recent_history = history[-5:] if len(history) >= 5 else history
         history_parts = []
 
-        # Add a header to emphasize the importance of the conversation history
-        history_parts.append("--- PREVIOUS CONVERSATION ---")
+        # Add a header that emphasizes continuity
+        history_parts.append("--- PREVIOUS CONVERSATION (MAINTAIN CONTINUITY WITH THIS) ---")
 
-        # Track topics discussed
-        topics_discussed = []
-        key_terms = []
+        # Track the conversation flow more explicitly
+        last_student_question = None
+        last_assistant_response = None
+        current_subtopic = None
 
         for i, exchange in enumerate(recent_history):
             student_msg = exchange.get('student_message', '')
             assistant_msg = exchange.get('assistant_message', '')
             topic = exchange.get('topic', 'Unknown')
 
-            # Track topics
-            if topic not in ["Introduction", "Topic Selection"] and topic not in topics_discussed:
-                topics_discussed.append(topic)
-
-            # Extract potential key terms from assistant messages (simplified approach)
-            potential_terms = re.findall(r'\*\*(.*?)\*\*', assistant_msg)
-            key_terms.extend(potential_terms)
+            # Track the most recent messages for continuity
+            if i == len(recent_history) - 1:
+                last_student_question = student_msg
+                last_assistant_response = assistant_msg
+                current_subtopic = self._extract_subtopic(assistant_msg)
 
             # Add more context about each exchange
             history_parts.append(f"Exchange {i + 1} (Topic: {topic}):")
@@ -674,17 +675,22 @@ class RAGEngine:
             history_parts.append("Assistant: " + assistant_msg)
             history_parts.append("---")
 
-        # Add topic summary
-        if topics_discussed:
-            history_parts.append(f"Main topics discussed: {', '.join(topics_discussed)}")
-
-        # Add key terms summary
-        if key_terms:
-            history_parts.append(f"Key terms mentioned: {', '.join(set(key_terms))}")
+        # Add explicit continuity guidance
+        if last_student_question and last_assistant_response:
+            history_parts.append("CONTINUITY GUIDANCE:")
+            history_parts.append(f"The student's most recent question/statement was: \"{last_student_question}\"")
+            history_parts.append(f"Your most recent response was about: \"{current_subtopic}\"")
+            history_parts.append(
+                "Ensure your next response directly builds on this exchange and acknowledges any correct information the student provided before asking new questions.")
 
         history_parts.append("--- CURRENT EXCHANGE ---")
 
         return "\n".join(history_parts)
+
+    def _extract_subtopic(self, text: str) -> str:
+        # Extract first sentence as a simple heuristic
+        first_sentence = text.split('.')[0] if '.' in text else text[:100]
+        return first_sentence
 
     def _extract_document_content(self, retrieved_docs: List[Document]) -> str:
         """Extract relevant content from retrieved documents"""
@@ -863,6 +869,15 @@ class RAGEngine:
         5. Ask the student what they think the next step or final answer would be
         6. Do not provide a "Conclusion" section that states the answer
         7. End with a question that encourages the student to complete the process
+        
+        CONVERSATION CONTINUITY:
+        - Always acknowledge the student's previous response before moving on
+        - If the student provides a correct answer or understanding, explicitly confirm it first
+        - If the student provides a partially correct answer, acknowledge what was correct before guiding further
+        - Maintain a natural conversation flow by referring to previous exchanges
+        - Use phrases like "As we discussed earlier..." or "Building on your answer about..."
+        - When asking new questions, connect them to the student's previous responses
+        - Avoid abrupt topic changes without acknowledging the previous exchange
         
         MULTIPLE-CHOICE QUESTION HANDLING:
         - When a student asks about a multiple-choice question:
@@ -1168,6 +1183,38 @@ class RAGEngine:
         logger.info(f"Generating concise response for topic: {context['detected_topic']}")
         response = self.llm.invoke(messages)
         return response.content
+
+    def _enhance_conversational_flow(self, response: str, query: str, history: List[Dict]) -> str:
+        """Enhance the conversational flow of the response"""
+        if not history:
+            return response
+
+        # Get the most recent exchange
+        last_exchange = history[-1]
+        last_student_msg = last_exchange.get('student_message', '')
+
+        # Check if the student provided an answer or calculation
+        student_provided_answer = any(pattern in query.lower() for pattern in [
+            "i think", "my answer", "the answer is", "it would be", "i believe",
+            "i calculated", "i got", "formula is"
+        ])
+
+        # If student provided an answer but response doesn't acknowledge it
+        if student_provided_answer and not any(pattern in response[:150].lower() for pattern in [
+            "you're right", "that's correct", "you are correct", "good job",
+            "well done", "that's right", "your understanding", "your answer"
+        ]):
+            # Add acknowledgment prefix
+            if "correct" in response.lower() or "right" in response.lower():
+                # Response already indicates correctness somewhere, just move it to the beginning
+                acknowledgment = "You're right! "
+            else:
+                # Add a neutral acknowledgment
+                acknowledgment = "Thank you for sharing your thoughts. "
+
+            return acknowledgment + response
+
+        return response
 
     def _is_verification_request(self, query: str) -> Tuple[bool, bool]:
         """
